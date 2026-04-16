@@ -356,7 +356,8 @@ contract NousCore is Pausable, ReentrancyGuard, Ownable {
     // ============================================================
 
     /// @notice Emergency withdraw stake. Author forfeits entire stake (no 50% return).
-    /// Use when you don't want to wait 30 days for slash. Stake goes to co-build pool.
+    /// Only allowed if no answers have been posted yet — prevents griefing answerers.
+    /// Stake goes to co-build pool.
     function forfeitStake(uint256 questionId) external {
         Question storage q = questions[questionId];
         if (q.author == address(0)) revert QuestionNotFound();
@@ -364,8 +365,9 @@ contract NousCore is Pausable, ReentrancyGuard, Ownable {
         if (q.author != msg.sender) revert NotAuthor();
         if (q.unlockCount > 0 || q.stakeRefunded) revert HasUnlocks();
         if (q.slashed) revert AlreadySlashed();
+        if (questionAnswerIds[questionId].length > 0) revert HasUnlocks(); // can't forfeit after answers posted
         q.slashed = true;
-        coBuildPool += q.stake; // entire stake goes to community
+        coBuildPool += q.stake;
         emit QuestionSlashed(questionId, q.stake, 0);
     }
 
@@ -393,10 +395,14 @@ contract NousCore is Pausable, ReentrancyGuard, Ownable {
     // View
     // ============================================================
 
-    /// @notice Check if contract balance covers all obligations (earnings + coBuildPool + pending stakes).
-    /// Returns true if solvent. If false, something is very wrong — pause and investigate.
-    function isSolvent() external view returns (bool) {
-        return address(this).balance >= coBuildPool;
+    /// @notice Contract balance. Anyone can verify on-chain that funds are present.
+    function contractBalance() external view returns (uint256) {
+        return address(this).balance;
+    }
+
+    /// @notice Total committed in co-build pool.
+    function coBuildPoolBalance() external view returns (uint256) {
+        return coBuildPool;
     }
 
     function isPaidQuestion(uint256 questionId) external view returns (bool) {

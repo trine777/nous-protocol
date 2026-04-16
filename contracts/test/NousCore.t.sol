@@ -500,6 +500,18 @@ contract NousCoreTest is Test {
         core.forfeitStake(qId);
     }
 
+    function test_forfeitStake_cantForfeitAfterAnswer() public {
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
+        // Someone answers — now forfeit is blocked to prevent griefing
+        vm.prank(bob);
+        core.createAnswer(qId, keccak256("effort"), 0.05 ether, 0);
+
+        vm.prank(alice);
+        vm.expectRevert(NousCore.HasUnlocks.selector);
+        core.forfeitStake(qId);
+    }
+
     function test_withdrawWorksWhenPaused() public {
         vm.prank(alice);
         uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
@@ -532,7 +544,7 @@ contract NousCoreTest is Test {
         assertEq(core.earnings(alice), 0.005 ether);
     }
 
-    function test_solvency() public {
+    function test_contractBalance() public {
         vm.prank(alice);
         uint256 qId = core.createPaidQuestion{value: 1 ether}(keccak256("q"));
         vm.prank(bob);
@@ -540,6 +552,8 @@ contract NousCoreTest is Test {
         vm.prank(charlie);
         core.unlockAnswer{value: 0.5 ether}(aId);
 
-        assertTrue(core.isSolvent());
+        // Contract holds stake (1 ETH) + unlock fee (0.5 ETH) = 1.5 ETH
+        assertEq(core.contractBalance(), 1.5 ether);
+        assertGt(core.contractBalance(), core.coBuildPoolBalance());
     }
 }
