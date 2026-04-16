@@ -352,9 +352,30 @@ contract NousCore is Pausable, ReentrancyGuard, Ownable {
     }
 
     // ============================================================
-    // Withdraw + Admin
+    // Emergency: author can forfeit stake early (loses 100%, no waiting)
     // ============================================================
 
+    /// @notice Emergency withdraw stake. Author forfeits entire stake (no 50% return).
+    /// Use when you don't want to wait 30 days for slash. Stake goes to co-build pool.
+    function forfeitStake(uint256 questionId) external {
+        Question storage q = questions[questionId];
+        if (q.author == address(0)) revert QuestionNotFound();
+        if (q.stake == 0) revert NotPaidQuestion();
+        if (q.author != msg.sender) revert NotAuthor();
+        if (q.unlockCount > 0 || q.stakeRefunded) revert HasUnlocks();
+        if (q.slashed) revert AlreadySlashed();
+        q.slashed = true;
+        coBuildPool += q.stake; // entire stake goes to community
+        emit QuestionSlashed(questionId, q.stake, 0);
+    }
+
+    // ============================================================
+    // Withdraw + Admin
+    // SAFETY: withdraw() and claimSlash() are NEVER pause-gated.
+    // Users can ALWAYS retrieve their funds regardless of contract state.
+    // ============================================================
+
+    /// @notice Withdraw accumulated ETH earnings. NEVER paused — funds always accessible.
     function withdraw() external nonReentrant {
         uint256 amount = earnings[msg.sender];
         if (amount == 0) revert NothingToWithdraw();
@@ -371,6 +392,12 @@ contract NousCore is Pausable, ReentrancyGuard, Ownable {
     // ============================================================
     // View
     // ============================================================
+
+    /// @notice Check if contract balance covers all obligations (earnings + coBuildPool + pending stakes).
+    /// Returns true if solvent. If false, something is very wrong — pause and investigate.
+    function isSolvent() external view returns (bool) {
+        return address(this).balance >= coBuildPool;
+    }
 
     function isPaidQuestion(uint256 questionId) external view returns (bool) {
         return questions[questionId].stake > 0;

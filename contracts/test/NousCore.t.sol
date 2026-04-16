@@ -462,4 +462,84 @@ contract NousCoreTest is Test {
         vm.expectRevert(NousCore.InvalidCitation.selector);
         core.createAnswer(qId, keccak256("a"), 0.1 ether, 999);
     }
+
+    // ============================================================
+    // SAFETY: forfeit stake + withdraw-when-paused + solvency
+    // ============================================================
+
+    function test_forfeitStake() public {
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 1 ether}(keccak256("q"));
+
+        // Alice wants out immediately — forfeits entire stake to co-build pool
+        vm.prank(alice);
+        core.forfeitStake(qId);
+
+        assertEq(core.coBuildPool(), 1 ether);
+        assertEq(core.earnings(alice), 0); // gets nothing back
+    }
+
+    function test_forfeitStake_notAuthor() public {
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
+        vm.prank(bob);
+        vm.expectRevert(NousCore.NotAuthor.selector);
+        core.forfeitStake(qId);
+    }
+
+    function test_forfeitStake_cantForfeitAfterUnlock() public {
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
+        vm.prank(bob);
+        uint256 aId = core.createAnswer(qId, keccak256("a"), 0.01 ether, 0);
+        vm.prank(charlie);
+        core.unlockAnswer{value: 0.01 ether}(aId);
+
+        vm.prank(alice);
+        vm.expectRevert(NousCore.HasUnlocks.selector);
+        core.forfeitStake(qId);
+    }
+
+    function test_withdrawWorksWhenPaused() public {
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
+        vm.prank(bob);
+        uint256 aId = core.createAnswer(qId, keccak256("a"), 1 ether, 0);
+        vm.prank(charlie);
+        core.unlockAnswer{value: 1 ether}(aId);
+
+        // Owner pauses contract
+        vm.prank(founder);
+        core.pause();
+
+        // Bob can still withdraw — withdraw is NEVER paused
+        uint256 before = bob.balance;
+        vm.prank(bob);
+        core.withdraw();
+        assertGt(bob.balance, before);
+    }
+
+    function test_slashWorksWhenPaused() public {
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
+
+        vm.prank(founder);
+        core.pause();
+
+        vm.warp(block.timestamp + 31 days);
+        // Slash works even when paused
+        core.claimSlash(qId);
+        assertEq(core.earnings(alice), 0.005 ether);
+    }
+
+    function test_solvency() public {
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 1 ether}(keccak256("q"));
+        vm.prank(bob);
+        uint256 aId = core.createAnswer(qId, keccak256("a"), 0.5 ether, 0);
+        vm.prank(charlie);
+        core.unlockAnswer{value: 0.5 ether}(aId);
+
+        assertTrue(core.isSolvent());
+    }
 }
