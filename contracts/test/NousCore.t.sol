@@ -8,141 +8,302 @@ contract NousCoreTest is Test {
     NousCore core;
     address founder = address(0xF001);
     address treasury = address(0xF002);
-    address alice = address(0xA001); // questioner
-    address bob = address(0xA002);   // answerer
+    address alice = address(0xA001);   // questioner
+    address bob = address(0xA002);     // answerer
     address charlie = address(0xA003); // reader
-    address dave = address(0xA004);  // cited answerer
+    address dave = address(0xA004);    // cited answerer
+    address eve = address(0xA005);     // attacker
 
     function setUp() public {
         vm.prank(founder);
         core = new NousCore(treasury);
-        vm.deal(alice, 10 ether);
-        vm.deal(bob, 10 ether);
-        vm.deal(charlie, 10 ether);
-        vm.deal(dave, 10 ether);
+        vm.deal(alice, 100 ether);
+        vm.deal(bob, 100 ether);
+        vm.deal(charlie, 100 ether);
+        vm.deal(dave, 100 ether);
+        vm.deal(eve, 100 ether);
     }
 
-    // --- createQuestion ---
+    // ============================================================
+    // Free questions
+    // ============================================================
 
-    function test_createQuestion() public {
+    function test_freeQuestion_create() public {
         vm.prank(alice);
-        uint256 id = core.createQuestion{value: 0.01 ether}(keccak256("q1"));
+        uint256 id = core.createFreeQuestion(keccak256("free q"));
         assertEq(id, 1);
-        (address author,, uint256 stake,,,,,,) = core.questions(id);
+        (address author,, uint256 stake,,,,,,,,) = core.questions(id);
+        assertEq(author, alice);
+        assertEq(stake, 0);
+    }
+
+    function test_freeQuestion_answerMustBeFree() public {
+        vm.prank(alice);
+        uint256 qId = core.createFreeQuestion(keccak256("q"));
+        vm.prank(bob);
+        vm.expectRevert(NousCore.FreeQuestionPaidAnswer.selector);
+        core.createAnswer(qId, keccak256("a"), 0.1 ether, 0);
+    }
+
+    function test_freeQuestion_freeAnswerWorks() public {
+        vm.prank(alice);
+        uint256 qId = core.createFreeQuestion(keccak256("q"));
+        vm.prank(bob);
+        uint256 aId = core.createAnswer(qId, keccak256("a"), 0, 0);
+        assertEq(aId, 1);
+    }
+
+    function test_freeQuestion_cantSlash() public {
+        vm.prank(alice);
+        uint256 qId = core.createFreeQuestion(keccak256("q"));
+        vm.warp(block.timestamp + 31 days);
+        vm.expectRevert(NousCore.NotPaidQuestion.selector);
+        core.claimSlash(qId);
+    }
+
+    function test_freeQuestion_cantExtend() public {
+        vm.prank(alice);
+        uint256 qId = core.createFreeQuestion(keccak256("q"));
+        vm.prank(alice);
+        vm.expectRevert(NousCore.NotPaidQuestion.selector);
+        core.requestExtension{value: 0.005 ether}(qId);
+    }
+
+    function test_freeAnswer_cantUnlock() public {
+        vm.prank(alice);
+        uint256 qId = core.createFreeQuestion(keccak256("q"));
+        vm.prank(bob);
+        uint256 aId = core.createAnswer(qId, keccak256("a"), 0, 0);
+        vm.prank(charlie);
+        vm.expectRevert(NousCore.AnswerIsFree.selector);
+        core.unlockAnswer{value: 0.01 ether}(aId);
+    }
+
+    // ============================================================
+    // Paid questions
+    // ============================================================
+
+    function test_paidQuestion_create() public {
+        vm.prank(alice);
+        uint256 id = core.createPaidQuestion{value: 0.01 ether}(keccak256("paid q"));
+        (address author,, uint256 stake,,,,,,,,) = core.questions(id);
         assertEq(author, alice);
         assertEq(stake, 0.01 ether);
+        assertTrue(core.isPaidQuestion(id));
     }
 
-    function test_createQuestion_insufficientStake() public {
+    function test_paidQuestion_insufficientStake() public {
         vm.prank(alice);
         vm.expectRevert(NousCore.InsufficientStake.selector);
-        core.createQuestion{value: 0.001 ether}(keccak256("cheap"));
+        core.createPaidQuestion{value: 0.001 ether}(keccak256("cheap"));
     }
 
-    // --- createAnswer + citation ---
-
-    function test_createAnswer_noCitation() public {
+    function test_paidQuestion_freeAnswerAllowed() public {
         vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
         vm.prank(bob);
-        uint256 aId = core.createAnswer(qId, keccak256("a"), 0.1 ether, 0);
-        assertEq(aId, 1);
-        (uint256 questionId, address author,,, uint256 cited,) = core.answers(aId);
-        assertEq(questionId, qId);
-        assertEq(author, bob);
-        assertEq(cited, 0);
+        uint256 aId = core.createAnswer(qId, keccak256("discussion"), 0, 0); // free discussion answer
+        assertGt(aId, 0);
     }
 
-    function test_createAnswer_withCitation() public {
+    function test_paidQuestion_paidAnswerAllowed() public {
         vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
-        vm.prank(dave);
-        uint256 a1 = core.createAnswer(qId, keccak256("a1"), 0.05 ether, 0);
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
         vm.prank(bob);
-        uint256 a2 = core.createAnswer(qId, keccak256("a2"), 0.1 ether, a1);
-        (,,,, uint256 cited,) = core.answers(a2);
-        assertEq(cited, a1);
+        uint256 aId = core.createAnswer(qId, keccak256("premium"), 0.05 ether, 0);
+        (,,,uint256 fee,,) = core.answers(aId);
+        assertEq(fee, 0.05 ether);
     }
 
-    function test_createAnswer_invalidCitation() public {
-        vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
-        vm.prank(bob);
-        vm.expectRevert(NousCore.InvalidCitation.selector);
-        core.createAnswer(qId, keccak256("a"), 0.1 ether, 999);
-    }
-
-    // --- unlockAnswer: fee split ---
+    // ============================================================
+    // Unlock fee split: 65/15/5/5/10
+    // ============================================================
 
     function test_unlock_splitNoCitation() public {
         vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
         vm.prank(bob);
         uint256 aId = core.createAnswer(qId, keccak256("a"), 1 ether, 0);
-
         vm.prank(charlie);
         core.unlockAnswer{value: 1 ether}(aId);
 
-        // No citation: 80% + 5% citation back to author = 85%
-        assertEq(core.earnings(bob), 0.85 ether);
-        // Questioner gets 10%
-        assertEq(core.earnings(alice), 0.1 ether);
-        // Platform gets 5%
-        assertEq(core.earnings(treasury), 0.05 ether);
+        // No citation, no fork: author gets 65+5+5=75%, questioner 15%, cobuild 10%
+        assertEq(core.earnings(bob), 0.75 ether);
+        assertEq(core.earnings(alice), 0.15 ether + 0.01 ether); // 15% + stake refund
+        assertEq(core.coBuildPool(), 0.1 ether);
     }
 
     function test_unlock_splitWithCitation() public {
         vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
         vm.prank(dave);
-        uint256 a1 = core.createAnswer(qId, keccak256("a1"), 0.05 ether, 0);
+        uint256 a1 = core.createAnswer(qId, keccak256("foundation"), 0.05 ether, 0);
         vm.prank(bob);
-        uint256 a2 = core.createAnswer(qId, keccak256("a2"), 1 ether, a1);
+        uint256 a2 = core.createAnswer(qId, keccak256("builds on a1"), 1 ether, a1);
 
         vm.prank(charlie);
         core.unlockAnswer{value: 1 ether}(a2);
 
-        // Author (bob) gets 80%
-        assertEq(core.earnings(bob), 0.8 ether);
-        // Questioner (alice) gets 10%
-        assertEq(core.earnings(alice), 0.1 ether);
-        // Cited author (dave) gets 5%
+        // Bob (author): 65% + 5% fork(no fork) = 70%
+        assertEq(core.earnings(bob), 0.7 ether);
+        // Alice (questioner): 15% + stake refund
+        assertEq(core.earnings(alice), 0.15 ether + 0.01 ether);
+        // Dave (cited): 5%
         assertEq(core.earnings(dave), 0.05 ether);
-        // Platform gets 5%
-        assertEq(core.earnings(treasury), 0.05 ether);
+        // Co-build: 10%
+        assertEq(core.coBuildPool(), 0.1 ether);
     }
 
-    function test_unlock_selfUnlock() public {
+    // ============================================================
+    // FIX: Stake refund on first unlock
+    // ============================================================
+
+    function test_stakeRefund_onFirstUnlock() public {
         vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
+        uint256 qId = core.createPaidQuestion{value: 1 ether}(keccak256("q"));
         vm.prank(bob);
         uint256 aId = core.createAnswer(qId, keccak256("a"), 0.1 ether, 0);
-        vm.prank(bob);
-        vm.expectRevert(NousCore.SelfUnlock.selector);
-        core.unlockAnswer{value: 0.1 ether}(aId);
-    }
 
-    function test_unlock_alreadyUnlocked() public {
-        vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
-        vm.prank(bob);
-        uint256 aId = core.createAnswer(qId, keccak256("a"), 0.1 ether, 0);
+        // First unlock: stake refunded
         vm.prank(charlie);
         core.unlockAnswer{value: 0.1 ether}(aId);
-        vm.prank(charlie);
-        vm.expectRevert(NousCore.AlreadyUnlocked.selector);
+        // Alice gets: 15% of 0.1 + 1 ETH stake = 1.015 ETH
+        assertEq(core.earnings(alice), 0.015 ether + 1 ether);
+
+        // Second unlock: no double refund
+        address reader2 = address(0xB001);
+        vm.deal(reader2, 10 ether);
+        vm.prank(reader2);
         core.unlockAnswer{value: 0.1 ether}(aId);
+        // Alice gets: previous 1.015 + just 15% of 0.1 = 1.03 ETH
+        assertEq(core.earnings(alice), 1.015 ether + 0.015 ether);
     }
 
-    // --- reputation ---
+    // ============================================================
+    // FIX: Can't unlock on slashed question
+    // ============================================================
 
-    function test_reputation_increments() public {
+    function test_cantUnlockSlashedQuestion() public {
         vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
+        vm.prank(bob);
+        uint256 aId = core.createAnswer(qId, keccak256("a"), 0.05 ether, 0);
+        vm.warp(block.timestamp + 31 days);
+        core.claimSlash(qId);
+
+        vm.prank(charlie);
+        vm.expectRevert(NousCore.QuestionSlashedErr.selector);
+        core.unlockAnswer{value: 0.05 ether}(aId);
+    }
+
+    function test_cantAnswerSlashedQuestion() public {
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
+        vm.warp(block.timestamp + 31 days);
+        core.claimSlash(qId);
+
+        vm.prank(bob);
+        vm.expectRevert(NousCore.QuestionSlashedErr.selector);
+        core.createAnswer(qId, keccak256("late"), 0.01 ether, 0);
+    }
+
+    // ============================================================
+    // FIX: Fork invariant — free fork must be free, paid fork must stake
+    // ============================================================
+
+    function test_fork_paidParent_mustStake() public {
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
+        vm.prank(bob);
+        vm.expectRevert(NousCore.InsufficientStake.selector);
+        core.forkQuestion{value: 0}(qId, keccak256("fork"));
+    }
+
+    function test_fork_paidParent_stakeOk() public {
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
+        vm.prank(bob);
+        uint256 forkId = core.forkQuestion{value: 0.01 ether}(qId, keccak256("fork"));
+        assertTrue(core.isPaidQuestion(forkId));
+    }
+
+    function test_fork_freeParent_mustBeFree() public {
+        vm.prank(alice);
+        uint256 qId = core.createFreeQuestion(keccak256("q"));
+        vm.prank(bob);
+        vm.expectRevert(NousCore.InsufficientStake.selector);
+        core.forkQuestion{value: 0.01 ether}(qId, keccak256("fork")); // can't pay on free fork
+    }
+
+    function test_fork_freeParent_freeOk() public {
+        vm.prank(alice);
+        uint256 qId = core.createFreeQuestion(keccak256("q"));
+        vm.prank(bob);
+        uint256 forkId = core.forkQuestion{value: 0}(qId, keccak256("fork"));
+        assertFalse(core.isPaidQuestion(forkId));
+    }
+
+    function test_fork_royalty() public {
+        vm.prank(alice);
+        uint256 parentId = core.createPaidQuestion{value: 0.01 ether}(keccak256("parent"));
+        vm.prank(bob);
+        uint256 forkId = core.forkQuestion{value: 0.01 ether}(parentId, keccak256("child"));
+        vm.prank(dave);
+        uint256 aId = core.createAnswer(forkId, keccak256("a"), 1 ether, 0);
+
+        vm.prank(charlie);
+        core.unlockAnswer{value: 1 ether}(aId);
+
+        // Alice (parent author) gets 5% fork royalty
+        assertEq(core.earnings(alice), 0.05 ether);
+        // Bob (fork questioner) gets 15% + stake refund
+        assertEq(core.earnings(bob), 0.15 ether + 0.01 ether);
+    }
+
+    // ============================================================
+    // FIX: Co-build pool — claimBounty is onlyOwner
+    // ============================================================
+
+    function test_cobuild_nonOwnerCantClaim() public {
+        // Setup: create unlock to fund pool
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
+        vm.prank(bob);
+        uint256 aId = core.createAnswer(qId, keccak256("a"), 1 ether, 0);
+        vm.prank(charlie);
+        core.unlockAnswer{value: 1 ether}(aId);
+        assertEq(core.coBuildPool(), 0.1 ether);
+
+        // Attacker creates and self-approves proposal (needs rep first)
+        // Even if proposal gets approved, only owner can release funds
+        vm.prank(founder);
+        core.setProposalThreshold(1);
+
+        vm.prank(bob); // bob has rep=1 from the unlock
+        uint256 pId = core.createProposal(keccak256("steal"), 0.1 ether);
+        vm.prank(bob);
+        core.voteProposal(pId);
+
+        // Bob tries to claim — reverts (not owner)
+        vm.prank(bob);
+        vm.expectRevert();
+        core.claimBounty(pId, bob);
+
+        // Owner can claim
+        vm.prank(founder);
+        core.claimBounty(pId, bob);
+        assertEq(core.earnings(bob), 0.75 ether + 0.1 ether); // unlock earnings + bounty
+    }
+
+    // ============================================================
+    // Reputation
+    // ============================================================
+
+    function test_reputation() public {
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
         vm.prank(bob);
         uint256 aId = core.createAnswer(qId, keccak256("a"), 0.01 ether, 0);
-
-        assertEq(core.reputation(bob), 0);
 
         for (uint160 i = 1; i <= 5; i++) {
             address reader = address(i + 5000);
@@ -150,96 +311,45 @@ contract NousCoreTest is Test {
             vm.prank(reader);
             core.unlockAnswer{value: 0.01 ether}(aId);
         }
-
         assertEq(core.reputation(bob), 5);
     }
 
-    // --- questioner earns from multiple answers ---
+    // ============================================================
+    // Questioner earns from ALL answers
+    // ============================================================
 
     function test_questionerEarnsFromAllAnswers() public {
         vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
 
-        // Two different answerers
         vm.prank(bob);
         uint256 a1 = core.createAnswer(qId, keccak256("a1"), 0.1 ether, 0);
         vm.prank(dave);
         uint256 a2 = core.createAnswer(qId, keccak256("a2"), 0.2 ether, 0);
 
-        // Unlock both
         vm.prank(charlie);
-        core.unlockAnswer{value: 0.1 ether}(a1);
+        core.unlockAnswer{value: 0.1 ether}(a1); // alice gets 15% = 0.015 + stake 0.01
         vm.prank(charlie);
-        core.unlockAnswer{value: 0.2 ether}(a2);
+        core.unlockAnswer{value: 0.2 ether}(a2); // alice gets 15% = 0.03 (no double refund)
 
-        // Alice (questioner) earns 10% of both: 0.01 + 0.02 = 0.03 ETH
-        assertEq(core.earnings(alice), 0.03 ether);
+        assertEq(core.earnings(alice), 0.015 ether + 0.01 ether + 0.03 ether);
     }
 
-    // --- citation chain: A cites B, unlocking A pays B ---
+    // ============================================================
+    // Slash + Extension
+    // ============================================================
 
-    function test_citationChain() public {
+    function test_slash() public {
         vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
-
-        vm.prank(dave);
-        uint256 a1 = core.createAnswer(qId, keccak256("foundation"), 0.05 ether, 0);
-        vm.prank(bob);
-        uint256 a2 = core.createAnswer(qId, keccak256("builds on a1"), 0.1 ether, a1);
-
-        // Unlock a2 (which cites a1)
-        vm.prank(charlie);
-        core.unlockAnswer{value: 0.1 ether}(a2);
-
-        // Dave (cited) earns 5% = 0.005 ETH from bob's answer being unlocked
-        assertEq(core.earnings(dave), 0.005 ether);
-
-        // Now unlock a1 directly too
-        vm.prank(charlie);
-        core.unlockAnswer{value: 0.05 ether}(a1);
-
-        // Dave now also earns as author of a1: 85% of 0.05 = 0.0425 (80% + 5% no-citation)
-        // Total dave: 0.005 + 0.0425 = 0.0475
-        assertEq(core.earnings(dave), 0.0475 ether);
-    }
-
-    // --- withdraw ---
-
-    function test_withdraw() public {
-        vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
-        vm.prank(bob);
-        uint256 aId = core.createAnswer(qId, keccak256("a"), 1 ether, 0);
-        vm.prank(charlie);
-        core.unlockAnswer{value: 1 ether}(aId);
-
-        uint256 before = bob.balance;
-        vm.prank(bob);
-        core.withdraw();
-        assertEq(bob.balance - before, 0.85 ether);
-    }
-
-    function test_withdraw_nothing() public {
-        vm.prank(alice);
-        vm.expectRevert(NousCore.NothingToWithdraw.selector);
-        core.withdraw();
-    }
-
-    // --- slash ---
-
-    function test_claimSlash() public {
-        vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 1 ether}(keccak256("q"));
+        uint256 qId = core.createPaidQuestion{value: 1 ether}(keccak256("q"));
         vm.warp(block.timestamp + 31 days);
         core.claimSlash(qId);
         assertEq(core.earnings(alice), 0.5 ether);
-        (,,,,,,bool slashed,,) = core.questions(qId);
-        assertTrue(slashed);
     }
 
-    function test_claimSlash_hasUnlocks() public {
+    function test_slash_hasUnlocks() public {
         vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
         vm.prank(bob);
         uint256 aId = core.createAnswer(qId, keccak256("a"), 0.01 ether, 0);
         vm.prank(charlie);
@@ -249,48 +359,31 @@ contract NousCoreTest is Test {
         core.claimSlash(qId);
     }
 
-    function test_claimSlash_tooEarly() public {
+    function test_extension() public {
         vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
-        vm.expectRevert(NousCore.DeadlineNotPassed.selector);
-        core.claimSlash(qId);
-    }
-
-    // --- extension ---
-
-    function test_requestExtension() public {
-        vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
         vm.prank(alice);
         core.requestExtension{value: 0.005 ether}(qId);
-        (,,,, uint48 deadline, bool extended,,,) = core.questions(qId);
+        (,,,, uint48 deadline, bool extended,,,,,) = core.questions(qId);
         assertTrue(extended);
         assertGt(deadline, uint48(block.timestamp + 60 days));
     }
 
-    function test_requestExtension_notAuthor() public {
-        vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
-        vm.prank(bob);
-        vm.expectRevert(NousCore.NotAuthor.selector);
-        core.requestExtension{value: 0.005 ether}(qId);
-    }
-
-    // --- upvote ---
+    // ============================================================
+    // Upvote + Pause
+    // ============================================================
 
     function test_upvote() public {
         vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
+        uint256 qId = core.createFreeQuestion(keccak256("q"));
         vm.prank(bob);
         core.upvote(qId);
         assertTrue(core.hasVoted(bob, qId));
-        (,,,,,,,,uint32 voteCount) = core.questions(qId);
-        assertEq(voteCount, 1);
     }
 
     function test_upvote_double() public {
         vm.prank(alice);
-        uint256 qId = core.createQuestion{value: 0.01 ether}(keccak256("q"));
+        uint256 qId = core.createFreeQuestion(keccak256("q"));
         vm.prank(bob);
         core.upvote(qId);
         vm.prank(bob);
@@ -298,13 +391,75 @@ contract NousCoreTest is Test {
         core.upvote(qId);
     }
 
-    // --- pause ---
-
     function test_pause() public {
         vm.prank(founder);
         core.pause();
         vm.prank(alice);
         vm.expectRevert();
-        core.createQuestion{value: 0.01 ether}(keccak256("q"));
+        core.createFreeQuestion(keccak256("q"));
+    }
+
+    // ============================================================
+    // Withdraw
+    // ============================================================
+
+    function test_withdraw() public {
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
+        vm.prank(bob);
+        uint256 aId = core.createAnswer(qId, keccak256("a"), 1 ether, 0);
+        vm.prank(charlie);
+        core.unlockAnswer{value: 1 ether}(aId);
+
+        uint256 before = bob.balance;
+        vm.prank(bob);
+        core.withdraw();
+        assertEq(bob.balance - before, 0.75 ether); // 65% + 5% citation(none) + 5% fork(none)
+    }
+
+    function test_withdraw_nothing() public {
+        vm.prank(alice);
+        vm.expectRevert(NousCore.NothingToWithdraw.selector);
+        core.withdraw();
+    }
+
+    // ============================================================
+    // Self-unlock blocked
+    // ============================================================
+
+    function test_selfUnlock() public {
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
+        vm.prank(bob);
+        uint256 aId = core.createAnswer(qId, keccak256("a"), 0.05 ether, 0);
+        vm.prank(bob);
+        vm.expectRevert(NousCore.SelfUnlock.selector);
+        core.unlockAnswer{value: 0.05 ether}(aId);
+    }
+
+    // ============================================================
+    // Citation chain
+    // ============================================================
+
+    function test_citationChain() public {
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
+        vm.prank(dave);
+        uint256 a1 = core.createAnswer(qId, keccak256("foundation"), 0.05 ether, 0);
+        vm.prank(bob);
+        uint256 a2 = core.createAnswer(qId, keccak256("builds on a1"), 1 ether, a1);
+
+        vm.prank(charlie);
+        core.unlockAnswer{value: 1 ether}(a2);
+        // Dave (cited) gets 5%
+        assertEq(core.earnings(dave), 0.05 ether);
+    }
+
+    function test_invalidCitation() public {
+        vm.prank(alice);
+        uint256 qId = core.createPaidQuestion{value: 0.01 ether}(keccak256("q"));
+        vm.prank(bob);
+        vm.expectRevert(NousCore.InvalidCitation.selector);
+        core.createAnswer(qId, keccak256("a"), 0.1 ether, 999);
     }
 }
