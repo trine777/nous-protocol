@@ -19,3 +19,9 @@ dist/
 # IDE
 .vscode/
 .idea/
+
+# Foundry deps (install via forge install)
+contracts/lib/
+contracts/out/
+contracts/cache/
+contracts/broadcast/
